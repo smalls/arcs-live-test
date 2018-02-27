@@ -1,0 +1,880 @@
+/**
+ * @license
+ * Copyright (c) 2017 Google Inc. All rights reserved.
+ * This code may only be used under the BSD style license found at
+ * http://polymer.github.io/LICENSE.txt
+ * Code distributed by Google as part of this project is also
+ * subject to an additional IP rights grant found at
+ * http://polymer.github.io/PATENTS.txt
+ */
+
+{
+  var indent = '';
+  var startIndent = '';
+  var indents = [];
+  var deprecatedCommentWarningShown = false;
+  function extractIndented(items) {
+    return items[1].map(item => item[1]);
+  }
+  function optional(result, extract, defaultValue) {
+    if (result != null) {
+      let value = extract(result);
+      if (value != null) {
+        return value;
+      }
+    }
+    return defaultValue == null ? null : defaultValue;
+  }
+  function checkNormal(result) {
+    if (['string', 'number', 'boolean'].includes(typeof result) || result === null) {
+      return;
+    }
+    if (result === undefined) {
+      throw new Error(`result was undefined`);
+    }
+    if (Array.isArray(result)) {
+      for (let item of result) {
+        checkNormal(item);
+      }
+      return;
+    }
+    if (result.model) {
+      throw new Error(`unexpected 'model' in ${JSON.stringify(result)}`);
+    }
+    if (!result.location) {
+      throw new Error(`no 'location' in ${JSON.stringify(result)}`);
+    }
+    if (!result.kind) {
+      throw new Error(`no 'kind' in ${JSON.stringify(result)}`);
+    }
+    for (let key of Object.keys(result)) {
+      if (['location', 'kind'].includes(key)) {
+        continue;
+      }
+      checkNormal(result[key]);
+    }
+  }
+}
+
+Manifest
+  = eolWhiteSpace? Indent? items:((SameIndent Annotation eolWhiteSpace)? SameIndent ManifestItem)*
+  {
+    let result = items.map(item => {
+      let manifestItem = item[2];
+      manifestItem.annotation = optional(item[0], a => a[1], null);
+      return manifestItem;
+    });
+    checkNormal(result);
+    return result;
+  }
+
+ManifestItem
+  = Recipe
+  / Particle
+  / Import
+  / Schema
+  / ManifestStorage
+  / Shape
+  / Meta
+  / Resource
+
+Annotation = '@' annotation:lowerIdent { return annotation; }
+
+Resource = 'resource' whiteSpace name:TopLevelIdent eolWhiteSpace Indent SameIndent ResourceStart body:ResourceBody eolWhiteSpace? {
+  return {
+    kind: 'resource',
+    name,
+    data: body,
+    location: location()
+  };
+}
+
+ResourceStart = 'start' eolWhiteSpace { startIndent = indent; }
+
+ResourceBody = lines:(SameOrMoreIndent ResourceLine)+ {
+  return lines.map(line => line[0].substring(startIndent.length) + line[1]).join('');
+}
+
+ResourceLine = [^\n]* eol { return text(); }
+
+// TODO: Entity syntax.
+ManifestStorage
+  = ('view' / 'store') whiteSpace name:TopLevelIdent whiteSpace 'of' whiteSpace type:(SchemaInline / ListType / ReferenceType) id:(whiteSpace id)?
+    version:(whiteSpace Version)? tags:(whiteSpace TagList)? whiteSpace source:ManifestStorageSource eolWhiteSpace
+    items:(Indent (SameIndent ManifestStorageItem)+)?
+  {
+    items = optional(items, extractIndented, []);
+    return {
+      kind: 'view',
+      location: location(),
+      name,
+      type,
+      id: optional(id, id => id[1], null),
+      version: optional(version, version => version[1], null),
+      tags: optional(tags, tags => tags[1], null),
+      source: source.source,
+      origin: source.origin,
+      description: items.length > 0 ? items[0][2] : null
+    };
+  }
+
+ManifestStorageSource
+  = ManifestStorageFileSource / ManifestStorageResourceSource / ManifestStorageStorageSource
+
+ManifestStorageFileSource
+  = 'in' whiteSpace source:id { return {origin: 'file', source }; }
+
+ManifestStorageResourceSource
+  = 'in' whiteSpace source:TopLevelIdent { return {origin: 'resource', source }; }
+
+ManifestStorageStorageSource
+  = 'at' whiteSpace source:id { return {origin: 'storage', source }; }
+
+ManifestStorageItem
+  = ManifestStorageDescription
+
+ManifestStorageDescription
+  = 'description' whiteSpace backquotedString eolWhiteSpace
+
+Import
+  = 'import' whiteSpace path:id eolWhiteSpace
+  {
+    return {
+      kind: 'import',
+      location: location(),
+      path,
+    };
+  }
+
+Shape
+  = 'shape' whiteSpace name:TopLevelIdent typeVars:(whiteSpace? '<' whiteSpace? VariableTypeList whiteSpace? '>')? eolWhiteSpace items:(Indent (SameIndent ShapeItem)*)? eolWhiteSpace?
+  {
+    return {
+      kind: 'shape',
+      location: location(),
+      name,
+      interface: optional(items, extractIndented, []).find(item => item.kind == 'shape-interface'),
+      slots: optional(items, extractIndented, []).filter(item => item.kind == 'shape-slot'),
+    }
+  }
+
+ShapeItem
+  = ShapeInterface
+  / ShapeSlot
+
+
+ShapeInterface
+  = verb:(upperIdent / lowerIdent) '(' args:ShapeArgumentList? ')' eolWhiteSpace
+  {
+    return {
+      kind: 'shape-interface',
+      location: location(),
+      verb,
+      args: args || []
+    };
+  }
+
+ShapeArgumentList
+  = head:ShapeArgument tail:(',' whiteSpace ShapeArgument)*
+  {
+    return [head].concat(tail.map(a => a[2]));
+  }
+
+ShapeArgument
+  = direction:(ParticleArgumentDirection)? whiteSpace? type:(ParticleArgumentType)? whiteSpace? name:(lowerIdent)?
+  {
+    if (direction == 'host') {
+      error(`Shape cannot have arguments with a 'host' direction.`);
+    }
+
+    return {
+      kind: 'shape-argument',
+      location: location(),
+      direction,
+      type,
+      name,
+    };
+  }
+
+ShapeSlot
+  = isRequired:('must' whiteSpace)? direction:('consume' / 'provide') isSet:(whiteSpace 'set of')? name:(whiteSpace lowerIdent)? eolWhiteSpace
+  {
+    return {
+      kind: 'shape-slot',
+      location: location(),
+      name: optional(name, isRequired => name[1], null),
+      isRequired: optional(isRequired, isRequired => isRequired[0] == 'must', false),
+      direction,
+      isSet: !!isSet,
+    }
+  }
+
+Meta
+  = 'meta' eolWhiteSpace items:(Indent (SameIndent MetaItem)*)? eolWhiteSpace?
+{
+  items = items ? extractIndented(items): [];
+  return {kind: 'meta', items: items, location: location()};
+}
+
+MetaItem = MetaStorageKey / MetaName
+
+MetaName = 'name' whiteSpace? ':' whiteSpace? name:id eolWhiteSpace
+{
+  return { key: 'name', value: name, location: location(), kind: 'name' }
+}
+
+MetaStorageKey = 'storageKey' whiteSpace? ':' whiteSpace? key:id eolWhiteSpace
+{
+  return {key: 'storageKey', value: key, location: location(), kind: 'storageKey' }
+};
+
+Particle
+  = 'particle' whiteSpace name:TopLevelIdent implFile:(whiteSpace 'in' whiteSpace id)? eolWhiteSpace items:(Indent (SameIndent ParticleItem)*)? eolWhiteSpace?
+  {
+    let args = null;
+    let verbs = [];
+    let affordance = [];
+    let slots = [];
+    let description = null;
+    items = items ? extractIndented(items) : [];
+    items.forEach(item => {
+      if (item.kind == 'interface') {
+        if (/[A-Z]/.test(item.verb[0]) && item.verb != name) {
+          error(`Verb ${item.verb} must start with a lower case character or be same as particle name.`);
+        }
+        verbs.push(item.verb);
+        args = item.args;
+      } else if (item.kind == 'particle-slot') {
+        slots.push(item);
+      } else if (item.kind == 'description') {
+        // TODO: Super hacks.
+        description = {
+          kind: 'description?',
+          location: 'FIXME',
+        };
+        item.description.forEach(d => { description[d.name] = d.pattern; });
+      } else if (item.affordance) {
+        affordance.push(item.affordance)
+      } else {
+        error(`Particle ${name} contains an unknown element: ${item.name}`);
+      }
+    });
+    if (affordance.length == 0) {
+      // Add default affordance
+      affordance.push('dom');
+    }
+    affordance.push('mock');
+
+    return {
+      kind: 'particle',
+      location: location(),
+      name,
+      implFile: optional(implFile, implFile => implFile[3], null),
+      verbs,
+      args,
+      affordance,
+      slots,
+      description,
+    };
+  }
+
+ParticleItem
+  = ParticleInterface
+  / ParticleAffordance
+  / ParticleSlot
+  / ParticleDescription
+
+ParticleInterface
+  = verb:(upperIdent / lowerIdent) '(' args:ParticleArgumentList? ')' eolWhiteSpace
+  {
+    return {
+      kind: 'interface',
+      location: location(),
+      verb,
+      args: args || []
+    };
+  }
+
+ParticleArgumentList
+  = head:ParticleArgument tail:(',' whiteSpace ParticleArgument)*
+  {
+    return [head].concat(tail.map(a => a[2]));
+  }
+
+ParticleArgument
+  = direction:ParticleArgumentDirection whiteSpace type:ParticleArgumentType isOptional:'?'? whiteSpace name:lowerIdent
+  {
+    return {
+      kind: 'particle-argument',
+      location: location(),
+      direction,
+      type: type,
+      isOptional: !!isOptional,
+      name,
+    };
+  }
+
+ParticleArgumentDirection
+  = 'inout' / 'in' / 'out' / 'host'
+  {
+    return text();
+  }
+
+ParticleArgumentType
+  = VariableType
+  / SchemaInline
+  / ReferenceType
+  / ListType
+
+ListType
+  = '[' type:ParticleArgumentType ']'
+  {
+    return {
+      kind: 'list-type',
+      location: location(),
+      type,
+    };
+  }
+
+VariableType
+  = '~' name:lowerIdent
+  {
+    return {
+      kind: 'variable-type',
+      location: location(),
+      name,
+    };
+  }
+
+ReferenceType
+  = name:upperIdent
+  {
+    return {
+      kind: 'reference-type',
+      location: location(),
+      name,
+    };
+  }
+
+VariableTypeList
+  = head:VariableType tail:(',' whiteSpace VariableType)*
+  {
+    return [head, ...tail.map(a => a[2])];
+  }
+
+ParticleAffordance
+  = 'affordance' whiteSpace affordance:('dom-touch' / 'dom' / 'vr' / 'voice') eolWhiteSpace
+  {
+    return {
+      kind: 'particle-affordance',
+      location: location(),
+      affordance,
+    };
+  }
+
+ParticleSlot
+  = isRequired:('must' whiteSpace)? 'consume' whiteSpace isSet:('set of' whiteSpace)? name:(lowerIdent) tags:(whiteSpace TagList)? eolWhiteSpace
+    items:(Indent (SameIndent ParticleSlotItem)*)?
+  {
+    let formFactor = null;
+    let providedSlots = [];
+    items = optional(items, extractIndented, []);
+    items.forEach(item => {
+      if (item.kind == 'provided-slot') {
+        providedSlots.push(item);
+      } else if (item.kind == 'form-factor') {
+        if (formFactor)
+          error('duplicate form factor for a slot');
+        formFactor = item.formFactor;
+      } else {
+        error('Unsupported particle slot item ', item);
+      }
+    });
+    return {
+      kind: 'particle-slot',
+      location: location(),
+      name,
+      tags: optional(tags, tags => tags[1], []),
+      isRequired: optional(isRequired, isRequired => isRequired[0] == 'must', false),
+      isSet: !!isSet,
+      formFactor,
+      providedSlots
+    };
+  }
+
+ParticleSlotItem
+  = SlotFormFactor
+  / ParticleProvidedSlot
+
+SlotFormFactor
+  = 'formFactor' whiteSpace formFactor:('fullscreen' / 'big' / 'medium' / 'small') eolWhiteSpace
+  {
+    return {
+      kind: 'form-factor',
+      location: location(),
+      formFactor
+    };
+  }
+
+ParticleProvidedSlot
+  = 'provide' whiteSpace isSet:('set of' whiteSpace)? name:(lowerIdent) tags:(whiteSpace TagList)? eolWhiteSpace items:(Indent (SameIndent ParticleProvidedSlotItem)*)?
+  {
+    let formFactor = null;
+    let views = [];
+    items = items ? extractIndented(items) : [];
+    items.forEach(item => {
+      if (item.kind == 'form-factor') {
+        if (formFactor)
+          error('duplicate form factor for a slot');
+        formFactor = item.formFactor;
+      } else {
+        views.push(item.view);
+      }
+    });
+    return {
+      kind: 'provided-slot',
+      location: location(),
+      name,
+      tags: optional(tags, tags => tags[1], []),
+      isSet: !!isSet,
+      formFactor,
+      views
+    };
+  }
+
+ParticleProvidedSlotItem
+  = SlotFormFactor
+  / ParticleProvidedSlotView
+
+ParticleProvidedSlotView
+  = 'view' whiteSpace view:lowerIdent eolWhiteSpace
+  {
+    return {
+      kind: 'particle-provided-slot-view',
+      location: location(),
+      view,
+    };
+  }
+
+ParticleDescription
+  = 'description' whiteSpace pattern:backquotedString eolWhiteSpace viewDescriptions:(Indent (SameIndent ParticleViewDescription)+)?
+  {
+    return {
+      kind: 'description',
+      location: location(),
+      description: [
+        {
+          // TODO: this should be stored in a different field.
+          kind: 'default-description?',
+          location: location(),
+          name: 'pattern',
+          pattern: pattern,
+        },
+        ...optional(viewDescriptions, extractIndented, []),
+      ],
+    };
+  }
+
+ParticleViewDescription
+  = name:lowerIdent whiteSpace pattern:backquotedString eolWhiteSpace
+  {
+    return {
+      kind: 'view-description',
+      location: location(),
+      name,
+      pattern,
+    };
+  }
+
+Recipe
+  = 'recipe' name:(whiteSpace TopLevelIdent)? tags:(whiteSpace TagList)? eolWhiteSpace items:(Indent (SameIndent RecipeItem)*)?
+  {
+    return {
+      kind: 'recipe',
+      location: location(),
+      name: optional(name, name => name[1], null),
+      tags: optional(tags, tags => tags[1], []),
+      items: optional(items, extractIndented, []),
+    };
+  }
+
+RecipeItem
+  = RecipeParticle
+  / RecipeHandle
+  / RecipeSlot
+  / RecipeConnection
+  / RecipeSearch
+
+Name
+  = 'as' whiteSpace name:lowerIdent
+  {
+    return name;
+  }
+
+RecipeParticle
+  = ref:ParticleRef name:(whiteSpace Name)? eolWhiteSpace connections:(Indent (SameIndent RecipeParticleItem)*)?
+  {
+    let handleConnections = [];
+    let slotConnections = [];
+    if (connections) {
+      connections = extractIndented(connections);
+      for (let conn of connections) {
+        if (conn.kind == 'handle-connection')
+          handleConnections.push(conn);
+        else
+          slotConnections.push(conn)
+      }
+    }
+    return {
+      kind: 'particle',
+      location: location(),
+      name: optional(name, name => name[1], null),
+      ref,
+      connections: handleConnections,
+      slotConnections: slotConnections,
+    };
+  }
+
+RecipeParticleItem = RecipeParticleConnection / RecipeParticleSlotConnection
+
+RecipeParticleConnection
+  = param:(lowerIdent / '*') whiteSpace dir:Direction target:(whiteSpace ConnectionTarget)? eolWhiteSpace
+  {
+    return {
+      kind: 'handle-connection',
+      location: location(),
+      param,
+      dir,
+      target: optional(target, target => target[1], null),
+    };
+  }
+
+RecipeParticleSlotConnection
+  = 'consume' whiteSpace param:lowerIdent name:(whiteSpace Name)? eolWhiteSpace providedSlots:(Indent (SameIndent RecipeParticleProvidedSlot)*)?
+  {
+    return {
+      kind: 'slot-connection',
+      location: location(),
+      param,
+      name: optional(name, name=>name[1], null),
+      providedSlots: optional(providedSlots, extractIndented, [])
+    };
+  }
+
+RecipeParticleProvidedSlot
+  = 'provide' whiteSpace param:lowerIdent name:(whiteSpace Name)? eolWhiteSpace
+  {
+    return {
+      kind: 'provided-slot',
+      location: location(),
+      param,
+      name: optional(name, name=>name[1], null)
+    };
+  }
+
+RecipeConnection
+  = from:ConnectionTarget whiteSpace dir:Direction whiteSpace to:ConnectionTarget eolWhiteSpace
+  {
+    return {
+      kind: 'connection',
+      location: location(),
+      dir,
+      from,
+      to,
+    };
+  }
+
+RecipeSearch
+  = 'search' whiteSpace phrase:backquotedString eolWhiteSpace tokens:(Indent (SameIndent 'tokens' t:(whiteSpace backquotedString)+ eolWhiteSpace))?
+
+  {
+    return {
+      kind: 'search',
+      location: location(),
+      phrase,
+      tokens: optional(tokens, tokens => tokens[1][2].map(t => t[1]), null)
+    };
+  }
+
+Direction
+  = dir:('<-' / '->' / '=')
+
+ConnectionTarget
+  = ident:(upperIdent / lowerIdent) param:('.' lowerIdent)? tags:(whiteSpace TagList)?
+  {
+    let particle = null;
+    let name = null;
+    if (ident) {
+      if (/^[A-Z]/.test(ident)) {
+        particle = ident;
+      } else {
+        name = ident;
+      }
+    }
+
+    return {
+      kind: 'connection-target',
+      location: location(),
+      particle,
+      name,
+      param: optional(param, param => param[1], null),
+      tags: optional(tags, tags => tags[1], []),
+    }
+  }
+  / tags:TagList
+  {
+    return {
+      kind: 'connection-target',
+      location: location(),
+      tags,
+    };
+  }
+
+RecipeHandle
+  = type:('?' / 'use' / 'map' / 'create' / 'copy') ref:(whiteSpace HandleOrSlotRef)? name:(whiteSpace Name)? eolWhiteSpace
+  {
+    return {
+      kind: 'view',
+      location: location(),
+      name: optional(name, name => name[1], null),
+      ref: optional(ref, ref => ref[1], null),
+      fate: type
+    }
+  }
+
+Tag
+  = '#' [a-zA-Z][a-zA-Z0-9_]* {return text()}
+
+TagList
+  = head:Tag tail:(whiteSpace TagList)?
+  { return [head, ...(tail && tail[1] || [])]; }
+
+SpaceTagList
+  = whiteSpace tags:TagList
+  { return tags; }
+
+ParticleRef
+  = name:upperIdent tags:SpaceTagList?
+  {
+    return {
+      kind: 'particle-ref',
+      location: location(),
+      name,
+      tags: tags || [],
+      verbs: [],
+    };
+  }
+  / tags:TagList
+  {
+    return {
+      kind: 'particle-ref',
+      location: location(),
+      tags,
+      verbs: [],
+    };
+  }
+  / 'particle can' whiteSpace verb:lowerIdent tags:SpaceTagList?
+  {
+    return {
+      kind: 'particle-ref',
+      location: location(),
+      verbs: [verb],
+      tags: tags || [],
+    };
+  }
+
+HandleOrSlotRef
+  = id:id tags:SpaceTagList?
+  {
+    return {
+      kind: 'view-ref',
+      location: location(),
+      id,
+      tags: tags || [],
+    };
+  }
+  / name:upperIdent tags:SpaceTagList?
+  {
+    return {
+      kind: 'view-ref',
+      location: location(),
+      name,
+      tags: tags || [],
+    };
+  }
+  / tags:TagList
+  {
+    return {
+      kind: 'view-ref',
+      location: location(),
+      tags,
+    };
+  }
+
+RecipeSlot
+  = 'slot' ref:(whiteSpace HandleOrSlotRef)? name:(whiteSpace Name)? eolWhiteSpace
+  {
+    return {
+      kind: 'slot',
+      location: location(),
+      ref: optional(ref, ref => ref[1], null),
+      name: optional(name, name => name[1], '')
+    }
+  }
+
+ExtendsList
+  = whiteSpace 'extends' whiteSpace first:upperIdent rest:(whiteSpace? ',' whiteSpace upperIdent)*
+{
+  var list = [first];
+  for (let item of rest) {
+    list.push(item[3]);
+  }
+  return list;
+}
+
+SchemaInline
+  = name:(upperIdent / '*') whiteSpace '{' fields:(SchemaInlineField (',' whiteSpace SchemaInlineField)*)? '}'
+  {
+    return {
+      kind: 'schema-inline',
+      location: location(),
+      name: name == '*' ? null : name,
+      fields: optional(fields, fields => [fields[0], ...fields[1].map(tail => tail[2])], []),
+    }
+  }
+
+SchemaInlineField
+  = type:(SchemaType whiteSpace)? name:lowerIdent
+  {
+    return {
+      kind: 'schema-inline-field',
+      location: location(),
+      name,
+      type: optional(type, type => type[0], null),
+    };
+  }
+
+Schema
+  = 'schema' whiteSpace name:TopLevelIdent parent:ExtendsList? eolWhiteSpace sections:(Indent (SameIndent SchemaSection)*)?
+  {
+    return {
+      kind: 'schema',
+      location: location(),
+      name: name,
+      parents: optional(parent, parent => parent, []),
+      sections: optional(sections, extractIndented, []),
+    };
+  }
+
+SchemaSection
+  = sectionType:('normative' / 'optional') eolWhiteSpace fields:(Indent (SameIndent SchemaField eolWhiteSpace)+)
+  {
+    return {
+      kind: 'schema-section',
+      location: location(),
+      sectionType,
+      fields: extractIndented(fields),
+    };
+  }
+
+SchemaField
+  = type:SchemaType whiteSpace name:lowerIdent
+  {
+    return {
+      kind: 'schema-field',
+      location: location(),
+      type,
+      name,
+    };
+  }
+
+SchemaType
+  = SchemaPrimitiveType / SchemaUnionType / SchemaTupleType
+
+SchemaPrimitiveType
+  = 'Text' / 'URL' / 'Number' / 'Boolean' / 'Object'
+
+SchemaUnionType
+  = '(' whiteSpace? first:SchemaPrimitiveType rest:(whiteSpace 'or' whiteSpace SchemaPrimitiveType)+ whiteSpace? ')'
+  {
+    let types = [first];
+    for (let type of rest) {
+      types.push(type[3]);
+    }
+    return {kind: 'schema-union', location: location(), types};
+  }
+
+SchemaTupleType
+  = '(' whiteSpace? first:SchemaPrimitiveType rest:(whiteSpace? ',' whiteSpace? SchemaPrimitiveType)* whiteSpace? ')'
+  {
+    let types = [first];
+    for (let type of rest) {
+      types.push(type[3]);
+    }
+    return {kind: 'schema-tuple', location: location(), types};
+  }
+
+Version
+  = '@' version:[0-9]+
+  {
+    return Number(version.join(''));
+  }
+
+Indent = &(i:" "+ &{
+  i = i.join('');
+  if (i.length > indent.length) {
+    indents.push(indent);
+    indent = i;
+    return true;
+  }
+})
+
+SameIndent = &(i:" "* &{
+  i = i.join('');
+  if (i.length == indent.length) {
+    return true;
+  } else if (i.length < indent.length) {
+    indent = indents.pop();
+    return false;
+  }
+}) " "*
+
+SameOrMoreIndent = &(i:" "* &{
+  i = i.join('');
+  if (i.length >= indent.length) {
+    return true;
+  } else if (i.length < indent.length) {
+    indent = indents.pop();
+    return false;
+  }
+}) " "* { return text(); }
+
+TopLevelIdent
+  = upperIdent
+  / lowerIdent
+  {
+    let fixed = text();
+    fixed = fixed.replace(/^(.)/, l => l.toUpperCase());
+    expected(`a top level identifier (e.g. "${fixed}")`);
+  }
+
+backquotedString = '`' pattern:([^`]+) '`' { return pattern.join(''); }
+id = "'" id:[^']+ "'" {return id.join('')}
+upperIdent = ident:([A-Z][a-z0-9_]i*) {return text()}
+lowerIdent = ident:([a-z][a-z0-9_]i*) {return text()}
+whiteSpace
+  = " "+
+eolWhiteSpace
+  = [ ]* !.
+  / [ ]* eol eolWhiteSpace?
+  / comment
+eol
+  = "\r"? "\n" "\r"?
+comment
+  = [ ]* marker:('#' / '//') [^\n]* eolWhiteSpace
+  {
+    if (marker === '#' && !deprecatedCommentWarningShown) {
+      console.warn("'#' for comments is deprecated. Please use '//' instead");
+      deprecatedCommentWarningShown = true;
+    }
+  }

@@ -1,0 +1,24 @@
+{
+  "manifest_version": 2,
+  "name": "arcs",
+  "version": "0",
+  "permissions": [
+    "tabs",
+    "<all_urls>"
+  ],
+  "background": {
+    "scripts": ["event-page-data.js", "event-page.js"],
+    "persistent": false
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*/*"],
+      "js": ["page-extractor.js", "arcs-content-script.js"],
+      "all_frames": true
+    }
+  ],
+  "chrome_url_overrides" : {
+    "newtab": "redirect-to-arcs.html"
+  },
+  "content_security_policy": "script-src 'self' 'sha256-rdk56h4D+jfInKWMNE+DL5C923/KiX9j3/l0Cdvgj0c='; object-src 'self'"
+}
